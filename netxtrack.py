@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+# DEVELOPER: root0emir 
 import sys
 import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -84,6 +84,9 @@ class PacketCaptureThread(QThread):
                 packet_info = self.process_packet(packet)
                 self.packet_buffer.append(packet_info)
                 
+                # Check alert rules
+                self.check_alert_rules(packet_info)
+                
                 current_time = time.time()
                 if len(self.packet_buffer) >= self.buffer_size or (current_time - self.last_update) >= self.update_interval:
                     self.flush_buffer()
@@ -99,12 +102,56 @@ class PacketCaptureThread(QThread):
             'destination': packet[IP].dst if IP in packet else 'N/A',
             'protocol': self.get_protocol_name(packet),
             'length': len(packet),
-            'type': self.get_packet_type(packet)
+            'type': self.get_packet_type(packet),
+            'raw': bytes(packet),  # Store raw packet data for PCAP export
+            'details': {}  # Initialize details dictionary
         }
         
+        # Extract detailed packet information
         if IP in packet:
             proto = packet[IP].proto
             self.stats[proto] += 1
+            packet_info['details']['ip'] = {
+                'version': packet[IP].version,
+                'ihl': packet[IP].ihl,
+                'tos': packet[IP].tos,
+                'len': packet[IP].len,
+                'id': packet[IP].id,
+                'ttl': packet[IP].ttl,
+                'proto': packet[IP].proto
+            }
+            
+        if TCP in packet:
+            packet_info['details']['tcp'] = {
+                'sport': packet[TCP].sport,
+                'dport': packet[TCP].dport,
+                'seq': packet[TCP].seq,
+                'ack': packet[TCP].ack,
+                'flags': packet[TCP].flags
+            }
+            
+        if UDP in packet:
+            packet_info['details']['udp'] = {
+                'sport': packet[UDP].sport,
+                'dport': packet[UDP].dport,
+                'len': packet[UDP].len
+            }
+            
+        if ICMP in packet:
+            packet_info['details']['icmp'] = {
+                'type': packet[ICMP].type,
+                'code': packet[ICMP].code
+            }
+            
+        if ARP in packet:
+            packet_info['details']['arp'] = {
+                'hwtype': packet[ARP].hwtype,
+                'ptype': packet[ARP].ptype,
+                'hwsrc': packet[ARP].hwsrc,
+                'psrc': packet[ARP].psrc,
+                'hwdst': packet[ARP].hwdst,
+                'pdst': packet[ARP].pdst
+            }
             
         current_time = (datetime.now() - self.start_time).total_seconds()
         self.traffic_data['timestamps'].append(current_time)
@@ -144,6 +191,37 @@ class PacketCaptureThread(QThread):
         elif ARP in packet:
             return 'ARP'
         return 'Other'
+    
+    def add_alert_rule(self, rule):
+        self.alert_rules.append(rule)
+        
+    def check_alert_rules(self, packet_info):
+        for rule in self.alert_rules:
+            if not rule['enabled']:
+                continue
+                
+            match = False
+            
+            if rule['type'] == 'protocol' and packet_info['protocol'] == rule['value']:
+                match = True
+            elif rule['type'] == 'source' and packet_info['source'] == rule['value']:
+                match = True
+            elif rule['type'] == 'destination' and packet_info['destination'] == rule['value']:
+                match = True
+            elif rule['type'] == 'port' and 'tcp' in packet_info['details']:
+                if str(packet_info['details']['tcp']['sport']) == rule['value'] or str(packet_info['details']['tcp']['dport']) == rule['value']:
+                    match = True
+            elif rule['type'] == 'port' and 'udp' in packet_info['details']:
+                if str(packet_info['details']['udp']['sport']) == rule['value'] or str(packet_info['details']['udp']['dport']) == rule['value']:
+                    match = True
+                    
+            if match:
+                alert = {
+                    'timestamp': datetime.now().strftime('%H:%M:%S.%f')[:-3],
+                    'rule': rule['name'],
+                    'packet': packet_info
+                }
+                self.alert_triggered.emit(alert)
         
     def stop(self):
         self.is_running = False
@@ -203,6 +281,7 @@ class Netxtrack(QMainWindow):
         self.current_file = None
         self.filter_history = []
         self.alert_rules = []
+        self.stats = defaultdict(int)  # Initialize stats attribute
         self.protocol_colors = {
             'TCP': QColor(0, 128, 255),
             'UDP': QColor(0, 255, 128),
@@ -577,21 +656,23 @@ class Netxtrack(QMainWindow):
             self.duration_label.setText(str(duration).split('.')[0])
             
     def update_system_info(self):
-e
         self.cpu_label.setText(f"{psutil.cpu_percent()}%")
         self.memory_label.setText(f"{psutil.virtual_memory().percent}%")
         
-
+        # Use non-blocking approach for network I/O measurement
         net_io = psutil.net_io_counters()
-        bytes_sent = net_io.bytes_sent
-        bytes_recv = net_io.bytes_recv
-        time.sleep(1)
-        net_io = psutil.net_io_counters()
-        bytes_sent_diff = net_io.bytes_sent - bytes_sent
-        bytes_recv_diff = net_io.bytes_recv - bytes_recv
-        total_bytes = bytes_sent_diff + bytes_recv_diff
         
-        self.network_label.setText(f"{total_bytes/1024:.2f} KB/s")
+        if hasattr(self, 'last_net_io'):
+            # Calculate difference since last measurement
+            bytes_sent_diff = net_io.bytes_sent - self.last_net_io.bytes_sent
+            bytes_recv_diff = net_io.bytes_recv - self.last_net_io.bytes_recv
+            total_bytes = bytes_sent_diff + bytes_recv_diff
+            
+            # Update network usage label
+            self.network_label.setText(f"{total_bytes/1024:.2f} KB/s")
+        
+        # Store current values for next measurement
+        self.last_net_io = net_io
             
     def update_statistics(self, stats):
 
